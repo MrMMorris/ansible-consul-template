@@ -3,13 +3,27 @@
   apt: >
     update_cache=yes
     cache_valid_time=3600
+  when: ansible_os_family == "Debian"
 
-- name: install deps
+- name: install deps (Debian)
   apt: >
     pkg={{item}}
     state=installed
   with_items:
     - unzip
+  when: ansible_os_family == "Debian"
+
+- name: fail with Fedora 22+
+  fail: msg="Fedora 22+ is not supported yet because it uses dnf"
+  when: ansible_distribution == "Fedora" and ansible_distribution_major_version|int >= 22
+
+- name: install deps (RedHat)
+  yum: >
+    pkg={{ item }}
+    state=installed
+  with_items:
+    - unzip
+  when: ansible_os_family == "RedHat"
 
 - name: create consul-template directory structure
   file: >
@@ -21,25 +35,49 @@
     - "{{ consul_template_home }}/config"
     - "{{ consul_template_home }}/templates"
 
-- name: copy consul-template binary
-  copy : >
-    src={{ consul_template_binary }}
-    dest={{ consul_template_home }}/bin
-    mode=0755
+- name: check archive stat
+  stat: path=/tmp/{{ consul_template_archive_file }}
+  register: consul_template_archive_stat
+
+- name: download consul-template binary
+  get_url:
+    url: "{{ consul_template_download_url }}"
+    dest: "/tmp"
+  when: consul_template_archive_stat.stat.exists == False
+
+- name: unzip the downloaded package
+  unarchive:
+    src: "/tmp/{{ consul_template_archive_file }}"
+    dest: "/tmp"
+    owner: "root"
+    group: "root"
+    copy: False
+    creates: "/tmp/{{ consul_template_binary }}"
+
+- name: copy consul-template binary into place
+  command: cp /tmp/{{ consul_template_binary }} {{ consul_template_home }}/bin/{{ consul_template_binary }}
+    creates={{ consul_template_home }}/bin/{{ consul_template_binary }}
+
+- name: Update consul-template permissions
+  file:
+    path: "{{ consul_template_home }}/bin/{{ consul_template_binary }}"
+    owner: "root"
+    group: "root"
+    mode: "0755"
 
 - name: copy consul-template systemd service configuration
   template: >
     src=consul-template.service.systemd.j2
     dest=/etc/systemd/system/consul-template.service
     mode=0755
-  when: use_systemd
+  when: consul_template_use_systemd
 
 - name: copy consul-template upstart service configuration
   template: >
     src=consul-template.service.upstart.j2
     dest=/etc/init/consul-template.conf
     mode=0755
-  when: use_upstart
+  when: consul_template_use_upstart
 
 - name: add consul-template to path through profile.d
   template: >
@@ -51,7 +89,7 @@
 
 - name: consul-template config file
   template: >
-    src=consul-template.cfg.j2
+    src={{ consul_template_config_file_template }}
     dest={{ consul_template_home }}/config/{{ consul_template_config_file }}
     mode=0755
 
@@ -60,3 +98,15 @@
     src=consul-template.logrotate.j2
     dest=/etc/logrotate.d/consul-template
     mode=0644
+ 
+- name: copy template files
+  copy: src={{ item.src }} dest="{{ consul_template_home }}/templates/{{ item.src | basename }}"
+  with_items: consul_template_template_files
+  when: consul_template_template_files
+  notify: restart consul-template
+
+- name: copy template templates
+  template: src={{ item.src }} dest="{{ consul_template_home }}/templates/{{ item.src | basename | regex_replace('^(.*)\.j2$', '\\1') }}"
+  with_items: consul_template_template_templates
+  when: consul_template_template_templates
+  notify: restart consul-template

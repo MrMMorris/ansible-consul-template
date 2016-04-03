@@ -1,3 +1,3 @@
 ---
-- name: reload consul-template
-  action: service name=consul-template state=reloaded
+- name: restart consul-template
+  action: service name=consul-template state=restarted
